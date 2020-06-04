@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "DiscardServer": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AppConfig__TextToPrint": "test text",
+        "AppConfig__port": "8088"
+      }
+    }
+  }
+}

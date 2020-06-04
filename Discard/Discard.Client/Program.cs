@@ -11,13 +11,14 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using DotNetty.Handlers.Logging;
-using DotNetty.Handlers.Tls;
 using DotNetty.Transport.Bootstrapping;
 using DotNetty.Transport.Channels;
 using DotNetty.Transport.Channels.Sockets;
-using System.Runtime.InteropServices.ComTypes;
+using DotNetty.Handlers.Tls;
+using System.Net;
+using DotNetty.Buffers;
 
-namespace Discard.Server
+namespace Discard.Client
 {
     class Program
     {
@@ -31,54 +32,31 @@ namespace Discard.Server
                 })
                 .ConfigureServices((hostContext, services) =>
                 {
+                    services.AddOptions();
                     services.Configure<AppConfig>(hostContext.Configuration.GetSection("AppConfig"));
-                    services.AddSingleton<IHostedService, DiscardServer>();
                     services.AddSingleton<IHostedService, PrintTextToConsoleSvc>();
+                    services.AddSingleton<IHostedService, DiscardClient>();
                 })
                 .ConfigureLogging((hostingContext, logging) =>
                 {
                     logging.AddConfiguration(hostingContext.Configuration.GetSection("Logging"));
                     logging.AddConsole();
                 });
-            
+
             await hostBuilder.RunConsoleAsync();
         }
 
-        class DiscardServerHandler : SimpleChannelInboundHandler<object>
+
+
+        class DiscardClient : IHostedService, IDisposable
         {
-            private readonly ILogger _logger;
-
-            public DiscardServerHandler(ILogger<DiscardServer> logger)
-            {
-                _logger = logger;
-            }
-
-
-            protected override void ChannelRead0(IChannelHandlerContext context, object message)
-            {
-                _logger.LogInformation(message.ToString());
-            }
-
-            public override void ExceptionCaught(IChannelHandlerContext context, Exception e)
-            {
-                _logger.LogError(e.Message);
-                context.CloseAsync();
-            }
-        }
-
-        class DiscardServer : IHostedService, IDisposable
-        {
-            private readonly ILogger<DiscardServer> _logger;
+            private readonly ILogger<DiscardClient> _logger;
             private readonly IOptions<AppConfig> _appConfig;
-            private readonly ServerBootstrap _bootstrap = new ServerBootstrap();
-            private  Task<IChannel> bootstrapChannel;
-            private MultithreadEventLoopGroup _bossGroup;
+            private readonly Bootstrap _bootstrap = new Bootstrap();
+            private Task<IChannel> bootstrapChannel;
             private MultithreadEventLoopGroup _workGroup;
 
-            
-
-
-            public DiscardServer(ILogger<DiscardServer> logger, IOptions<AppConfig> appConfig)
+            public DiscardClient(ILogger<DiscardClient> logger, IOptions<AppConfig> appConfig)
             {
                 _logger = logger;
                 _appConfig = appConfig;
@@ -92,26 +70,25 @@ namespace Discard.Server
             public Task StartAsync(CancellationToken cancellationToken)
             {
                 _logger.LogInformation("Starting DiscardServer");
-                _logger.LogInformation($"listening on port: {_appConfig.Value.Port}");
+                _logger.LogInformation($"Connection to: {_appConfig.Value.Host}");
+                _logger.LogInformation($"Connection port: {_appConfig.Value.Port}");
 
-                _bossGroup = new MultithreadEventLoopGroup(1);
                 _workGroup = new MultithreadEventLoopGroup();
 
-                    
+
                 _bootstrap
-                .Group(_bossGroup, _workGroup)
-                .Channel<TcpServerSocketChannel>()
-                .Option(ChannelOption.SoBacklog, 100)
-                .Handler(new LoggingHandler("LSTN"))
-                .ChildHandler(new ActionChannelInitializer<ISocketChannel>(channel =>
-                { 
+                .Group(_workGroup)
+                .Channel<TcpSocketChannel>()
+                .Option(ChannelOption.TcpNodelay, true)
+                .Handler(new ActionChannelInitializer<ISocketChannel>(channel =>
+                {
                     IChannelPipeline pipeline = channel.Pipeline;
-                    pipeline.AddLast(new LoggingHandler("CONN"));
-                    pipeline.AddLast(new DiscardServerHandler(_logger));
+                    pipeline.AddLast(new LoggingHandler());
+                    pipeline.AddLast(new DiscardClientHandler(_logger, _appConfig));
                 }));
 
-                bootstrapChannel = _bootstrap.BindAsync(_appConfig.Value.Port);
-
+                IPAddress host = IPAddress.Parse(_appConfig.Value.Host);
+                bootstrapChannel = _bootstrap.ConnectAsync(new IPEndPoint(host, _appConfig.Value.Port));
 
                 return Task.CompletedTask;
 
@@ -119,13 +96,56 @@ namespace Discard.Server
 
             public Task StopAsync(CancellationToken cancellationToken)
             {
-                _logger.LogInformation("Stopping DiscardServer.");
+                _logger.LogInformation("Stopping Discard Client.");
                 bootstrapChannel.Wait();
-                Task.WaitAll(_bossGroup.ShutdownGracefullyAsync(), _workGroup.ShutdownGracefullyAsync());
+                Task.WaitAll(_workGroup.ShutdownGracefullyAsync());
                 return Task.CompletedTask;
             }
 
 
+        }
+
+        class DiscardClientHandler : SimpleChannelInboundHandler<object>
+        {
+            byte[] array;
+            private readonly ILogger _logger;
+            private readonly IOptions<AppConfig> _appConfig;
+
+            public DiscardClientHandler(ILogger<DiscardClient> logger, IOptions<AppConfig> appConfig)
+            {
+                _logger = logger;
+                _appConfig = appConfig;
+            }
+            public override void ChannelActive(IChannelHandlerContext context)
+            {
+                this.array = new byte[_appConfig.Value.Size];
+                this.GenerateTraffic(context);
+            }
+            protected override void ChannelRead0(IChannelHandlerContext context, object message)
+            {
+                // Server is supposed to send nothing, but if it sends something, discard it.
+            }
+            public override void ExceptionCaught(IChannelHandlerContext ctx, Exception e)
+            {
+                _logger.LogError(e.Message);
+                ctx.CloseAsync();
+            }
+
+            async void GenerateTraffic(IChannelHandlerContext context)
+            {
+                try
+                {
+                    IByteBuffer buffer = Unpooled.WrappedBuffer(this.array);
+                    // Flush the outbound buffer to the socket.
+                    // Once flushed, generate the same amount of traffic again.
+                    await context.WriteAndFlushAsync(buffer);
+                    this.GenerateTraffic(context);
+                }
+                catch
+                {
+                    await context.CloseAsync();
+                }
+            }
         }
 
         class PrintTextToConsoleSvc : IHostedService, IDisposable
@@ -173,7 +193,11 @@ namespace Discard.Server
         class AppConfig
         {
             public string TextToPrint { get; set; }
+            public string Host { get; set; }
             public int Port { get; set; }
+            public int Size { get; set; }
         }
+
     }
+
 }

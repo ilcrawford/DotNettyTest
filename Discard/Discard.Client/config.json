@@ -1,0 +1,6 @@
+{
+  "TextToPrint": "test",
+  "Host": "localhost",
+  "Port": 8088,
+  "Size": 10
+}

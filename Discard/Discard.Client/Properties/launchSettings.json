@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "Discard.Client": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "AppConfig__Port": "8088",
+        "AppConfig__Size": "10",
+        "AppConfig__Host": "127.0.0.1"
+      }
+    }
+  }
+}
