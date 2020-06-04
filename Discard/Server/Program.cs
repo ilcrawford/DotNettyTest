@@ -16,7 +16,7 @@ using DotNetty.Transport.Channels;
 using DotNetty.Transport.Channels.Sockets;
 using System.Runtime.InteropServices.ComTypes;
 
-namespace GenericHost
+namespace Discard.Server
 {
     class Program
     {
